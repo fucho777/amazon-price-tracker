@@ -4,13 +4,14 @@ import json
 import logging
 import schedule
 import tweepy
+import requests
+import hashlib
+import hmac
+import base64
 from datetime import datetime
+import urllib.parse
 from dotenv import load_dotenv
-from paapi5_python_sdk.api.default_api import DefaultApi
-from paapi5_python_sdk.models.get_items_request import GetItemsRequest
-from paapi5_python_sdk.models.get_items_resource import GetItemsResource
-from paapi5_python_sdk.models.partner_type import PartnerType
-from paapi5_python_sdk.rest import ApiException
+import re
 
 # 環境変数の読み込み
 load_dotenv()
@@ -30,7 +31,8 @@ logger = logging.getLogger("amazon_tracker")
 PA_API_KEY = os.getenv("PA_API_KEY")
 PA_API_SECRET = os.getenv("PA_API_SECRET")
 PARTNER_TAG = os.getenv("PARTNER_TAG")
-MARKETPLACE = os.getenv("MARKETPLACE", "www.amazon.co.jp")
+MARKETPLACE = "www.amazon.co.jp"
+REGION = "us-west-2"  # PA-APIのリージョン
 
 # X API設定
 CONSUMER_KEY = os.getenv("TWITTER_CONSUMER_KEY")
@@ -48,7 +50,6 @@ class AmazonTracker:
         self.products = self.load_products()
         self.templates = self.load_templates()
         self.setup_twitter_api()
-        self.setup_paapi()
         
     def setup_twitter_api(self):
         """Twitter APIの設定"""
@@ -60,20 +61,6 @@ class AmazonTracker:
         except Exception as e:
             logger.error(f"Twitter API認証エラー: {e}")
             self.twitter_api = None
-    
-    def setup_paapi(self):
-        """PA-APIの設定"""
-        try:
-            self.default_api = DefaultApi(
-                access_key=PA_API_KEY,
-                secret_key=PA_API_SECRET,
-                host=MARKETPLACE,
-                region="us-west-2"  # Amazonの推奨リージョン
-            )
-            logger.info("PA-API設定完了")
-        except Exception as e:
-            logger.error(f"PA-API設定エラー: {e}")
-            self.default_api = None
     
     def load_products(self):
         """追跡商品リストを読み込む"""
@@ -135,15 +122,168 @@ class AmazonTracker:
         self.templates[name] = template_data
         self.save_templates()
         logger.info(f"新しいテンプレート「{name}」を追加しました")
+
+    def sign_request(self, host, path, payload):
+        """PA-APIリクエストに署名を生成"""
+        # リクエスト日時
+        amz_date = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+        datestamp = datetime.utcnow().strftime('%Y%m%d')
+        
+        # 署名に必要な値
+        service = 'ProductAdvertisingAPI'
+        algorithm = 'AWS4-HMAC-SHA256'
+        canonical_uri = path
+        canonical_querystring = ''
+        
+        # ヘッダーの準備
+        headers = {
+            'host': host,
+            'x-amz-date': amz_date,
+            'content-encoding': 'amz-1.0',
+            'content-type': 'application/json; charset=utf-8',
+            'x-amz-target': 'com.amazon.paapi5.v1.ProductAdvertisingAPIv1.GetItems'
+        }
+        
+        # カノニカルリクエストの作成
+        canonical_headers = '\n'.join([f"{k}:{v}" for k, v in sorted(headers.items())]) + '\n'
+        signed_headers = ';'.join(sorted(headers.keys()))
+        
+        # ペイロードのSHA256ハッシュ
+        payload_hash = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+        
+        # カノニカルリクエスト
+        canonical_request = '\n'.join([
+            'POST',
+            canonical_uri,
+            canonical_querystring,
+            canonical_headers,
+            signed_headers,
+            payload_hash
+        ])
+        
+        # 署名の作成
+        credential_scope = f"{datestamp}/{REGION}/{service}/aws4_request"
+        string_to_sign = '\n'.join([
+            algorithm,
+            amz_date,
+            credential_scope,
+            hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
+        ])
+        
+        # 署名キーの生成
+        def sign(key, msg):
+            return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
+        
+        signing_key = sign(('AWS4' + PA_API_SECRET).encode('utf-8'), datestamp)
+        signing_key = sign(signing_key, REGION)
+        signing_key = sign(signing_key, service)
+        signing_key = sign(signing_key, 'aws4_request')
+        
+        # 署名の計算
+        signature = hmac.new(signing_key, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
+        
+        # 認証ヘッダーの生成
+        auth_header = (
+            f"{algorithm} "
+            f"Credential={PA_API_KEY}/{credential_scope}, "
+            f"SignedHeaders={signed_headers}, "
+            f"Signature={signature}"
+        )
+        
+        # ヘッダーに認証情報を追加
+        headers['Authorization'] = auth_header
+        
+        return headers
+    
+    def call_pa_api(self, asin_list):
+        """PA-APIを呼び出して商品情報を取得"""
+        host = "webservices.amazon.co.jp"
+        path = "/paapi5/getitems"
+        url = f"https://{host}{path}"
+        
+        # リクエストペイロード
+        payload = {
+            "ItemIds": asin_list,
+            "Resources": [
+                "ItemInfo.Title",
+                "Offers.Listings.Price",
+                "Offers.Listings.Availability.Message",
+                "Offers.Listings.DeliveryInfo.IsAmazonFulfilled"
+            ],
+            "PartnerTag": PARTNER_TAG,
+            "PartnerType": "Associates",
+            "Marketplace": "www.amazon.co.jp"
+        }
+        
+        payload_json = json.dumps(payload)
+        headers = self.sign_request(host, path, payload_json)
+        
+        try:
+            response = requests.post(url, headers=headers, data=payload_json)
+            if response.status_code != 200:
+                logger.error(f"PA-API エラー: {response.status_code} - {response.text}")
+                return None
+            
+            return response.json()
+            
+        except Exception as e:
+            logger.error(f"PA-API 呼び出しエラー: {e}")
+            return None
+    
+    def parse_pa_api_response(self, response):
+        """PA-APIレスポンスから商品情報を抽出"""
+        result = {}
+        
+        if not response or "ItemsResult" not in response or "Items" not in response["ItemsResult"]:
+            return result
+        
+        for item in response["ItemsResult"]["Items"]:
+            asin = item.get("ASIN")
+            if not asin:
+                continue
+            
+            # 商品タイトル
+            title = "不明"
+            if "ItemInfo" in item and "Title" in item["ItemInfo"] and "DisplayValue" in item["ItemInfo"]["Title"]:
+                title = item["ItemInfo"]["Title"]["DisplayValue"]
+            
+            # 価格
+            price = None
+            if "Offers" in item and "Listings" in item["Offers"] and len(item["Offers"]["Listings"]) > 0:
+                listing = item["Offers"]["Listings"][0]
+                if "Price" in listing and "Amount" in listing["Price"]:
+                    price = int(float(listing["Price"]["Amount"]))
+            
+            # 在庫状況
+            availability = "不明"
+            if "Offers" in item and "Listings" in item["Offers"] and len(item["Offers"]["Listings"]) > 0:
+                listing = item["Offers"]["Listings"][0]
+                if "Availability" in listing and "Message" in listing["Availability"]:
+                    availability = listing["Availability"]["Message"]
+            
+            # 商品詳細URL
+            detail_url = f"https://www.amazon.co.jp/dp/{asin}?tag={PARTNER_TAG}"
+            if "DetailPageURL" in item:
+                detail_url = item["DetailPageURL"]
+            
+            result[asin] = {
+                "title": title,
+                "price": price,
+                "availability": availability,
+                "detail_page_url": detail_url
+            }
+        
+        return result
     
     def add_product(self, asin):
         """商品を追跡リストに追加（アフィリエイトリンク対応）"""
-        if not self.default_api:
-            logger.error("PA-API未設定のため商品を追加できません")
+        # PA-APIで商品情報を取得
+        api_response = self.call_pa_api([asin])
+        if not api_response:
+            logger.error(f"PA-API呼び出しに失敗しました: {asin}")
             return False
         
-        # 商品情報を取得
-        product_info = self.fetch_product_info([asin])
+        product_info = self.parse_pa_api_response(api_response)
         if not product_info or asin not in product_info:
             logger.error(f"商品情報の取得に失敗: {asin}")
             return False
@@ -154,7 +294,7 @@ class AmazonTracker:
         url = item_info.get("detail_page_url", f"https://www.amazon.co.jp/dp/{asin}?tag={PARTNER_TAG}")
         
         # URLにアフィリエイトタグが含まれていない場合は追加
-        if "?tag=" not in url and "&tag=" not in url:
+        if "?tag=" not in url and "&tag=" not in url and PARTNER_TAG:
             url_separator = "&" if "?" in url else "?"
             url = f"{url}{url_separator}tag={PARTNER_TAG}"
         
@@ -180,94 +320,6 @@ class AmazonTracker:
         logger.info(f"新商品を追加しました: {product['name']} ({asin})")
         return True
     
-    def fetch_product_info(self, asin_list):
-        """PA-APIから商品情報を取得"""
-        if not self.default_api:
-            logger.error("PA-API未設定のため商品情報を取得できません")
-            return None
-        
-        try:
-            # リクエスト設定
-            get_items_request = GetItemsRequest(
-                partner_tag=PARTNER_TAG,
-                partner_type=PartnerType.ASSOCIATES,
-                marketplace=MARKETPLACE,
-                item_ids=asin_list,
-                resources=[
-                    GetItemsResource.ITEM_INFO_TITLE,
-                    GetItemsResource.OFFERS_LISTINGS_PRICE,
-                    GetItemsResource.OFFERS_LISTINGS_AVAILABILITY_MESSAGE,
-                    GetItemsResource.OFFERS_LISTINGS_AVAILABILITY_TYPE,
-                    GetItemsResource.OFFERS_LISTINGS_DELIVERY_INFO_IS_PRIME_ELIGIBLE,
-                    GetItemsResource.OFFERS_LISTINGS_SAVING_BASIS
-                ]
-            )
-            
-            # API呼び出し
-            response = self.default_api.get_items(get_items_request)
-            
-            result = {}
-            
-            # レスポンス解析
-            if response.items_result is not None:
-                for item in response.items_result.items:
-                    asin = item.asin
-                    
-                    # 価格情報
-                    price = None
-                    if (item.offers is not None and 
-                        item.offers.listings is not None and 
-                        len(item.offers.listings) > 0 and
-                        item.offers.listings[0].price is not None):
-                        price = int(float(item.offers.listings[0].price.amount))
-                    
-                    # 在庫情報
-                    availability = "不明"
-                    if (item.offers is not None and 
-                        item.offers.listings is not None and 
-                        len(item.offers.listings) > 0 and
-                        item.offers.listings[0].availability is not None):
-                        availability = item.offers.listings[0].availability.message
-                    
-                    # 商品タイトル
-                    title = "不明"
-                    if (item.item_info is not None and 
-                        item.item_info.title is not None and
-                        item.item_info.title.display_value is not None):
-                        title = item.item_info.title.display_value
-                    
-                    # 商品ページURL（アフィリエイトリンク）
-                    detail_url = f"https://www.amazon.co.jp/dp/{asin}?tag={PARTNER_TAG}"
-                    if item.detail_page_url is not None:
-                        # PA-APIから返されるURLには既にアソシエイトタグが含まれている
-                        detail_url = item.detail_page_url
-                    
-                    # Primeステータス
-                    is_prime = False
-                    if (item.offers is not None and 
-                        item.offers.listings is not None and 
-                        len(item.offers.listings) > 0 and
-                        item.offers.listings[0].delivery_info is not None and
-                        item.offers.listings[0].delivery_info.is_prime_eligible is not None):
-                        is_prime = item.offers.listings[0].delivery_info.is_prime_eligible
-                    
-                    result[asin] = {
-                        "title": title,
-                        "price": price,
-                        "availability": availability,
-                        "detail_page_url": detail_url,
-                        "is_prime": is_prime
-                    }
-            
-            return result
-            
-        except ApiException as e:
-            logger.error(f"PA-API呼び出しエラー: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"商品情報取得エラー: {e}")
-            return None
-    
     def check_products(self):
         """全ての追跡商品の情報を更新"""
         if not self.products:
@@ -287,7 +339,12 @@ class AmazonTracker:
             # API呼び出し制限を考慮して待機
             time.sleep(1)
             
-            product_info = self.fetch_product_info(asin_list)
+            api_response = self.call_pa_api(asin_list)
+            if not api_response:
+                logger.error(f"PA-API呼び出しに失敗しました: {', '.join(asin_list)}")
+                continue
+            
+            product_info = self.parse_pa_api_response(api_response)
             if not product_info:
                 logger.error(f"商品情報の取得に失敗: {', '.join(asin_list)}")
                 continue
@@ -353,14 +410,13 @@ class AmazonTracker:
             return
         
         try:
-            import re
             name = product["name"]
             asin = product["asin"]
             url = product["url"]
             current_price = product["last_price"]
             
             # URLにアフィリエイトタグが含まれていない場合は追加
-            if "?tag=" not in url and "&tag=" not in url:
+            if "?tag=" not in url and "&tag=" not in url and PARTNER_TAG:
                 url_separator = "&" if "?" in url else "?"
                 url = f"{url}{url_separator}tag={PARTNER_TAG}"
             
