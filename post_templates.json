@@ -1,0 +1,34 @@
+{
+  "default": {
+    "title": "【Amazon価格・在庫変動】",
+    "price_up": "⬆️ {diff:,}円上昇 ({percent:.1f}%)",
+    "price_down": "⬇️ {diff:,}円下落 ({percent:.1f}%)",
+    "availability_change": "在庫状況: {old} → {new}",
+    "current_price": "現在価格: {price:,}円",
+    "footer": ""
+  },
+  "flash_sale": {
+    "title": "🔥【緊急値下げ速報】🔥",
+    "price_up": "値上げ: +{diff:,}円 (+{percent:.1f}%)",
+    "price_down": "【値下げ】{diff:,}円引き ({percent:.1f}%オフ)",
+    "availability_change": "在庫状況変更: {old} → {new}",
+    "current_price": "✅ 特価: {price:,}円",
+    "footer": "#お買い得 #タイムセール"
+  },
+  "tech_deals": {
+    "title": "📱【テック製品値下げ情報】💻",
+    "price_up": "価格上昇: {diff:,}円増 ({percent:.1f}%)",
+    "price_down": "💰値下げ中: {diff:,}円引き ({percent:.1f}%オフ)",
+    "availability_change": "📦在庫: {old} → {new}",
+    "current_price": "💲現在価格: {price:,}円",
+    "footer": "#テックセール #ガジェット"
+  },
+  "book_deals": {
+    "title": "📚【本・Kindle電子書籍情報】",
+    "price_up": "価格上昇: {diff:,}円 ({percent:.1f}%)",
+    "price_down": "📉お買い得: {diff:,}円割引 ({percent:.1f}%オフ)",
+    "availability_change": "入手可能性: {old} → {new}",
+    "current_price": "📕販売価格: {price:,}円",
+    "footer": "#読書 #本の購入"
+  }
+}

@@ -1,0 +1,15 @@
+# 環境変数
+.env
+
+# ログファイル
+*.log
+
+# Python キャッシュ
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 仮想環境
+venv/
+env/
+ENV/

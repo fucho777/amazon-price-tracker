@@ -1,0 +1,4 @@
+tweepy>=4.12.0
+schedule>=1.1.0
+python-dotenv>=1.0.0
+paapi5-python-sdk>=1.1.1
